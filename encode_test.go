@@ -788,7 +788,15 @@ func TestEncodeJSONNumber(t *testing.T) {
 		in   jsonT
 		want string
 	}{
-		{jsonT{}, "Num = 0"},
+		{jsonT{}, `
+			Num = 0
+			Arr = []
+			ArrP = []
+
+			[Tbl]
+
+			[TblP]
+		`},
 		{jsonT{
 			Num:  "1",
 			NumP: &n2,
@@ -950,7 +958,7 @@ func TestEncode(t *testing.T) {
 			input: struct{ IntSliceNil, IntSlice0, IntSlice3 []int }{
 				nil, []int{}, []int{1, 2, 3},
 			},
-			wantOutput: "IntSlice0 = []\nIntSlice3 = [1, 2, 3]\n",
+			wantOutput: "IntSliceNil = []\nIntSlice0 = []\nIntSlice3 = [1, 2, 3]\n",
 		},
 		"datetime slices": {
 			input: struct{ DatetimeSlice []time.Time }{
@@ -1595,8 +1603,12 @@ func TestEncodeNilMapValue(t *testing.T) {
 func TestEncodeNilTopLevelMap(t *testing.T) {
 	var m map[string]string
 	var buf bytes.Buffer
-	if err := NewEncoder(&buf).Encode(m); err == nil {
-		t.Error("expected error encoding nil top-level map")
+	err := NewEncoder(&buf).Encode(m)
+	if err != nil {
+		t.Fatalf("unexpected error encoding nil top-level map: %v", err)
+	}
+	if buf.String() != "" {
+		t.Errorf("expected empty output for nil top-level map, got: %q", buf.String())
 	}
 }
 
@@ -1741,6 +1753,62 @@ func TestEncodeTimeIsZero(t *testing.T) {
 		have := strings.TrimSpace(buf.String())
 		if have != "" {
 			t.Errorf("expected empty output for zero time.Time with omitzero, got:\n%s", have)
+		}
+	})
+}
+
+func TestEncodeNilContainers(t *testing.T) {
+	t.Run("top level nil slice", func(t *testing.T) {
+		var s []int
+		buf := new(bytes.Buffer)
+		err := NewEncoder(buf).Encode(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "[]"
+		if got := strings.TrimSpace(buf.String()); got != want {
+			t.Errorf("have %q, want %q", got, want)
+		}
+	})
+
+	t.Run("top level nil map", func(t *testing.T) {
+		var m map[string]int
+		buf := new(bytes.Buffer)
+		err := NewEncoder(buf).Encode(m)
+		if err != nil {
+			t.Fatalf("expected no error for top-level nil map, got: %v", err)
+		}
+	})
+
+	t.Run("struct field nil slice outputs []", func(t *testing.T) {
+		s := struct {
+			A int
+			B []int
+		}{A: 1}
+		buf := new(bytes.Buffer)
+		err := NewEncoder(buf).Encode(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := buf.String()
+		if !strings.Contains(got, "B = []") {
+			t.Errorf("expected nil slice to be encoded as [], got:\n%s", got)
+		}
+	})
+
+	t.Run("struct field nil map outputs section", func(t *testing.T) {
+		s := struct {
+			A int
+			M map[string]int
+		}{A: 1}
+		buf := new(bytes.Buffer)
+		err := NewEncoder(buf).Encode(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := buf.String()
+		if !strings.Contains(got, "[M]") {
+			t.Errorf("expected nil map to produce empty [M] section, got:\n%s", got)
 		}
 	})
 }

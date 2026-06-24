@@ -1634,9 +1634,15 @@ func TestJsonNumberLargeInteger(t *testing.T) {
 		wantErr bool
 	}{
 		{`j = 42`, false},
+		{`j = 16777216`, false},
+		{`j = 16777217`, true},
 		{`j = 9007199254740992`, false},
 		{`j = 9007199254740993`, true},
 		{`j = 3.14`, false},
+		{`j = 1.6777216e7`, false},
+		{`j = 1.6777217e7`, true},
+		{`j = 1e10`, false},
+		{`j = 1e16`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.toml, func(t *testing.T) {

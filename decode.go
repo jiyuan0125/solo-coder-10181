@@ -519,11 +519,20 @@ func (md *MetaData) unifyString(data any, rv reflect.Value) error {
 			if int64(float64(i)) != i {
 				return md.parseErr(errUnsafeFloat{i: float64(i), size: "json.Number", key: md.context.String()})
 			}
+			if int64(float32(float64(i))) != i {
+				return md.parseErr(errUnsafeFloat{i: float64(i), size: "json.Number", key: md.context.String()})
+			}
 			rv.SetString(strconv.FormatInt(i, 10))
 		} else if f, ok := data.(float64); ok {
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return md.parseErr(errParseRange{i: f, size: "json.Number"})
+			}
 			if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {
 				fi := int64(f)
 				if float64(fi) != f {
+					return md.parseErr(errUnsafeFloat{i: f, size: "json.Number", key: md.context.String()})
+				}
+				if float64(float32(f)) != f {
 					return md.parseErr(errUnsafeFloat{i: f, size: "json.Number", key: md.context.String()})
 				}
 			}

@@ -197,9 +197,6 @@ func (enc *Encoder) encode(key Key, rv reflect.Value) {
 		}
 		enc.encode(key, rv.Elem())
 	case reflect.Map:
-		if rv.IsNil() {
-			encPanic(errArrayNilElement)
-		}
 		enc.eTable(key, rv)
 	case reflect.Pointer:
 		if rv.IsNil() {
@@ -533,8 +530,12 @@ func (enc *Encoder) eStruct(key Key, rv reflect.Value, inline bool) {
 
 			fieldVal = eindirect(fieldVal)
 
-			if isNil(fieldVal) { /// Don't write anything for nil fields.
-				continue
+			if isNil(fieldVal) {
+				switch fieldVal.Kind() {
+				case reflect.Slice, reflect.Map:
+				default:
+					continue
+				}
 			}
 
 			keyName := fieldType.Name
