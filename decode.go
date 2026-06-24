@@ -265,16 +265,23 @@ func (md *MetaData) unify(data any, rv reflect.Value) error {
 
 	k := rv.Kind()
 
-	// For composite types (struct, map, array, slice), always use the normal
-	// decoding path even if they implement TextUnmarshaler. Only primitive
-	// types (strings, ints, floats, bools, interfaces) should use
-	// TextUnmarshaler.
-	//
-	// Note: `rv` may actually be a pointer here because `indirect()` returns a
-	// pointer whenever the pointer type implements TextUnmarshaler (so that the
-	// interface check below works). For the purpose of determining whether the
-	// *destination* is a composite type, we must fully dereference pointers
-	// (ignoring the TextUnmarshaler special case in indirect).
+	if d, ok := data.(time.Time); ok {
+		targetType := rv.Type()
+		for targetType.Kind() == reflect.Pointer {
+			targetType = targetType.Elem()
+		}
+		if targetType == timeType {
+			for rv.Kind() == reflect.Pointer {
+				if rv.IsNil() {
+					rv.Set(reflect.New(rv.Type().Elem()))
+				}
+				rv = rv.Elem()
+			}
+			rv.Set(reflect.ValueOf(d))
+			return nil
+		}
+	}
+
 	underlyingK := k
 	rvK := rv
 	for rvK.Kind() == reflect.Pointer {
@@ -288,10 +295,8 @@ func (md *MetaData) unify(data any, rv reflect.Value) error {
 	_, isArrayData := data.([]any)
 	_, isArrayTableData := data.([]map[string]any)
 	isCompositeData := isTableData || isArrayData || isArrayTableData
-	isCompositeKind := underlyingK == reflect.Struct || underlyingK == reflect.Map ||
-		underlyingK == reflect.Array || underlyingK == reflect.Slice
 
-	if !isCompositeData && !isCompositeKind {
+	if !isCompositeData {
 		if v, ok := rvi.(encoding.TextUnmarshaler); ok {
 			return md.unifyText(data, v)
 		}
@@ -366,14 +371,28 @@ func (md *MetaData) unifyStruct(mapping any, rv reflect.Value) error {
 	for _, key := range keys {
 		datum := tmap[key]
 		var f *field
+		var caseFoldCandidates []*field
 		for i := range fields {
 			ff := &fields[i]
 			if ff.name == key {
 				f = ff
 				break
 			}
-			if f == nil && strings.EqualFold(ff.name, key) {
-				f = ff
+			if strings.EqualFold(ff.name, key) {
+				caseFoldCandidates = append(caseFoldCandidates, ff)
+			}
+		}
+		if f == nil && len(caseFoldCandidates) == 1 {
+			f = caseFoldCandidates[0]
+		}
+		if f == nil && len(caseFoldCandidates) > 1 {
+			if _, ok := collisionsByLowerName[strings.ToLower(key)]; !ok {
+				md.Collisions = append(md.Collisions, FieldCollision{
+					Key:        md.context.add(key).String(),
+					StructType: structName,
+					FieldName:  caseFoldCandidates[0].name,
+					Dropped:    len(caseFoldCandidates),
+				})
 			}
 		}
 		if f != nil {
@@ -499,8 +518,17 @@ func (md *MetaData) unifyString(data any, rv reflect.Value) error {
 	_, ok := rv.Interface().(json.Number)
 	if ok {
 		if i, ok := data.(int64); ok {
+			if int64(float64(i)) != i {
+				return md.parseErr(errUnsafeFloat{i: float64(i), size: "json.Number", key: md.context.String()})
+			}
 			rv.SetString(strconv.FormatInt(i, 10))
 		} else if f, ok := data.(float64); ok {
+			if !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f) {
+				fi := int64(f)
+				if float64(fi) != f {
+					return md.parseErr(errUnsafeFloat{i: f, size: "json.Number", key: md.context.String()})
+				}
+			}
 			rv.SetString(strconv.FormatFloat(f, 'g', -1, 64))
 		} else {
 			return md.badtype("string", data)
@@ -519,10 +547,16 @@ func (md *MetaData) unifyFloat64(data any, rv reflect.Value) error {
 	rvk := rv.Kind()
 
 	if num, ok := data.(float64); ok {
+		if math.IsNaN(num) || math.IsInf(num, 0) {
+			return md.parseErr(errParseRange{i: num, size: rvk.String()})
+		}
 		switch rvk {
 		case reflect.Float32:
 			if num < -math.MaxFloat32 || num > math.MaxFloat32 {
 				return md.parseErr(errParseRange{i: num, size: rvk.String()})
+			}
+			if float64(float32(num)) != num {
+				return md.parseErr(errUnsafeFloat{i: num, size: rvk.String(), key: md.context.String()})
 			}
 			fallthrough
 		case reflect.Float64:

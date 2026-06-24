@@ -198,7 +198,7 @@ func (enc *Encoder) encode(key Key, rv reflect.Value) {
 		enc.encode(key, rv.Elem())
 	case reflect.Map:
 		if rv.IsNil() {
-			return
+			encPanic(errArrayNilElement)
 		}
 		enc.eTable(key, rv)
 	case reflect.Pointer:
@@ -296,34 +296,16 @@ func (enc *Encoder) eElement(rv reflect.Value) {
 		enc.write(strconv.FormatUint(rv.Uint(), 10))
 	case reflect.Float32:
 		f := rv.Float()
-		if math.IsNaN(f) {
-			if math.Signbit(f) {
-				enc.write("-")
-			}
-			enc.write("nan")
-		} else if math.IsInf(f, 0) {
-			if math.Signbit(f) {
-				enc.write("-")
-			}
-			enc.write("inf")
-		} else {
-			enc.write(floatAddDecimal(strconv.FormatFloat(f, 'g', -1, 32)))
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			encPanic(fmt.Errorf("toml: NaN and Inf cannot be encoded to TOML"))
 		}
+		enc.write(floatAddDecimal(strconv.FormatFloat(f, 'g', -1, 32)))
 	case reflect.Float64:
 		f := rv.Float()
-		if math.IsNaN(f) {
-			if math.Signbit(f) {
-				enc.write("-")
-			}
-			enc.write("nan")
-		} else if math.IsInf(f, 0) {
-			if math.Signbit(f) {
-				enc.write("-")
-			}
-			enc.write("inf")
-		} else {
-			enc.write(floatAddDecimal(strconv.FormatFloat(f, 'g', -1, 64)))
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			encPanic(fmt.Errorf("toml: NaN and Inf cannot be encoded to TOML"))
 		}
+		enc.write(floatAddDecimal(strconv.FormatFloat(f, 'g', -1, 64)))
 	case reflect.Array, reflect.Slice:
 		enc.eArrayOrSliceElement(rv)
 	case reflect.Struct:
@@ -375,7 +357,7 @@ func (enc *Encoder) eArrayOfTables(key Key, rv reflect.Value) {
 	for i := 0; i < rv.Len(); i++ {
 		trv := eindirect(rv.Index(i))
 		if isNil(trv) {
-			continue
+			encPanic(errArrayNilElement)
 		}
 		enc.newline()
 		enc.writef("%s[[%s]]", enc.indentStr(key), key)
@@ -431,7 +413,7 @@ func (enc *Encoder) eMap(key Key, rv reflect.Value, inline bool) {
 		for i, mapKey := range mapKeys {
 			val := eindirect(rv.MapIndex(mapKey))
 			if isNil(val) {
-				continue
+				encPanic(errArrayNilElement)
 			}
 
 			if inline {
@@ -681,6 +663,19 @@ func isZero(rv reflect.Value) bool {
 		return rv.Uint() == 0
 	case reflect.Float32, reflect.Float64:
 		return rv.Float() == 0.0
+	case reflect.Struct:
+		if rv.Type() == timeType {
+			return rv.Interface().(time.Time).IsZero()
+		}
+		for i := 0; i < rv.NumField(); i++ {
+			if rv.Type().Field(i).PkgPath != "" && !rv.Type().Field(i).Anonymous {
+				continue
+			}
+			if !isZero(rv.Field(i)) {
+				return false
+			}
+		}
+		return true
 	}
 	return false
 }
@@ -696,16 +691,13 @@ func isEmpty(rv reflect.Value) bool {
 	case reflect.Array, reflect.Slice, reflect.Map, reflect.String:
 		return rv.Len() == 0
 	case reflect.Struct:
-		if rv.Type().Comparable() {
-			return reflect.Zero(rv.Type()).Interface() == rv.Interface()
+		if rv.Type() == timeType {
+			return rv.Interface().(time.Time).IsZero()
 		}
-		// Need to also check if all the fields are empty, otherwise something
-		// like this with uncomparable types will always return true:
-		//
-		//   type a struct{ field b }
-		//   type b struct{ s []string }
-		//   s := a{field: b{s: []string{"AAA"}}}
 		for i := 0; i < rv.NumField(); i++ {
+			if rv.Type().Field(i).PkgPath != "" && !rv.Type().Field(i).Anonymous {
+				continue
+			}
 			if !isEmpty(rv.Field(i)) {
 				return false
 			}

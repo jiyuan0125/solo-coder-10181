@@ -100,12 +100,15 @@ func untag(typed map[string]any) (any, error) {
 }
 
 func parseTime(v, format string, l *time.Location) (time.Time, error) {
-	t, err := time.Parse(format, v)
+	var t time.Time
+	var err error
+	if l != nil {
+		t, err = time.ParseInLocation(format, v, l)
+	} else {
+		t, err = time.Parse(format, v)
+	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("could not parse %q as a datetime: %w", v, err)
-	}
-	if l != nil {
-		t = t.In(l)
 	}
 	return t, nil
 }

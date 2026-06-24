@@ -115,10 +115,11 @@ func TestEncodeOmitEmptyStruct(t *testing.T) {
 			F Tpriv `toml:"f,omitempty"`
 		}{Tpriv{1, 0}}, "[f]\n  Int = 1"},
 
-		// Private field being set also counts as "not empty".
+		// Private field being set is not visible in TOML encoding, so
+		// Tpriv{0, 1} is treated as empty since all exported fields are zero.
 		{struct {
 			F Tpriv `toml:"f,omitempty"`
-		}{Tpriv{0, 1}}, "[f]\n  Int = 0"},
+		}{Tpriv{0, 1}}, ""},
 
 		// time.Time is common use case, so test that explicitly.
 		{struct {
@@ -438,8 +439,14 @@ func TestEncodeNaN(t *testing.T) {
 		Nan float32 `toml:"nan"`
 		Inf float32 `toml:"inf"`
 	}{float32(math.NaN()), float32(math.Inf(-1))}
-	encodeExpected(t, "", s1, "nan = nan\ninf = inf\n", nil)
-	encodeExpected(t, "", s2, "nan = nan\ninf = -inf\n", nil)
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(s1); err == nil {
+		t.Error("expected error encoding float64 NaN")
+	}
+	buf.Reset()
+	if err := NewEncoder(&buf).Encode(s2); err == nil {
+		t.Error("expected error encoding float32 NaN/Inf")
+	}
 }
 
 func TestEncodePrimitive(t *testing.T) {
@@ -1493,4 +1500,227 @@ func TestUnifyStructStableCaseInsensitiveMatch(t *testing.T) {
 	if len(observed) != 1 {
 		t.Errorf("case-insensitive field match was non-deterministic; observed masks: %v", observed)
 	}
+}
+
+func TestEncodeNaNInfFloat32(t *testing.T) {
+	s1 := struct {
+		F float32 `toml:"f"`
+	}{float32(math.NaN())}
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(s1); err == nil {
+		t.Error("expected error encoding float32 NaN")
+	}
+
+	buf.Reset()
+	s2 := struct {
+		F float32 `toml:"f"`
+	}{float32(math.Inf(1))}
+	if err := NewEncoder(&buf).Encode(s2); err == nil {
+		t.Error("expected error encoding float32 +Inf")
+	}
+
+	buf.Reset()
+	s3 := struct {
+		F float32 `toml:"f"`
+	}{float32(math.Inf(-1))}
+	if err := NewEncoder(&buf).Encode(s3); err == nil {
+		t.Error("expected error encoding float32 -Inf")
+	}
+}
+
+func TestEncodeNaNInfFloat64(t *testing.T) {
+	s1 := struct {
+		F float64 `toml:"f"`
+	}{math.NaN()}
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(s1); err == nil {
+		t.Error("expected error encoding float64 NaN")
+	}
+
+	buf.Reset()
+	s2 := struct {
+		F float64 `toml:"f"`
+	}{math.Inf(1)}
+	if err := NewEncoder(&buf).Encode(s2); err == nil {
+		t.Error("expected error encoding float64 +Inf")
+	}
+
+	buf.Reset()
+	s3 := struct {
+		F float64 `toml:"f"`
+	}{math.Inf(-1)}
+	if err := NewEncoder(&buf).Encode(s3); err == nil {
+		t.Error("expected error encoding float64 -Inf")
+	}
+}
+
+func TestEncodeNilArrayElement(t *testing.T) {
+	s := struct {
+		Arr []*int `toml:"arr"`
+	}{[]*int{nil}}
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(s); err == nil {
+		t.Error("expected error encoding slice with nil pointer element")
+	}
+}
+
+func TestEncodeNilMapValue(t *testing.T) {
+	m := map[string]*int{"k": nil}
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(m); err == nil {
+		t.Error("expected error encoding map with nil pointer value")
+	}
+}
+
+func TestEncodeNilTopLevelMap(t *testing.T) {
+	var m map[string]string
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(m); err == nil {
+		t.Error("expected error encoding nil top-level map")
+	}
+}
+
+func TestEncodeOmitZeroStruct(t *testing.T) {
+	type omitZeroStruct struct {
+		Exported int
+		private  int
+	}
+
+	t.Run("all zero", func(t *testing.T) {
+		s := struct {
+			F omitZeroStruct `toml:"field,omitzero"`
+		}{}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		if have != "" {
+			t.Errorf("expected empty output for all-zero struct with omitzero, got:\n%s", have)
+		}
+	})
+
+	t.Run("non-zero exported field", func(t *testing.T) {
+		s := struct {
+			F omitZeroStruct `toml:"field,omitzero"`
+		}{omitZeroStruct{Exported: 1, private: 0}}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		want := "[field]\n  Exported = 1"
+		if have != want {
+			t.Errorf("\nhave:\n%s\nwant:\n%s", have, want)
+		}
+	})
+
+	t.Run("zero exported non-zero unexported", func(t *testing.T) {
+		s := struct {
+			F omitZeroStruct `toml:"field,omitzero"`
+		}{omitZeroStruct{Exported: 0, private: 1}}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		if have != "" {
+			t.Errorf("expected empty output when exported field is zero and unexported is non-zero with omitzero, got:\n%s", have)
+		}
+	})
+}
+
+func TestEncodeOmitEmptyUnexportedFields(t *testing.T) {
+	type omitEmptyStruct struct {
+		Exported int
+		private  int
+	}
+
+	t.Run("all zero", func(t *testing.T) {
+		s := struct {
+			F omitEmptyStruct `toml:"field,omitempty"`
+		}{}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		if have != "" {
+			t.Errorf("expected empty output for all-zero struct with omitempty, got:\n%s", have)
+		}
+	})
+
+	t.Run("non-zero exported field", func(t *testing.T) {
+		s := struct {
+			F omitEmptyStruct `toml:"field,omitempty"`
+		}{omitEmptyStruct{Exported: 1, private: 0}}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		want := "[field]\n  Exported = 1"
+		if have != want {
+			t.Errorf("\nhave:\n%s\nwant:\n%s", have, want)
+		}
+	})
+
+	t.Run("zero exported non-zero unexported", func(t *testing.T) {
+		s := struct {
+			F omitEmptyStruct `toml:"field,omitempty"`
+		}{omitEmptyStruct{Exported: 0, private: 1}}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		if have != "" {
+			t.Errorf("expected empty output when exported field is zero and unexported is non-zero with omitempty, got:\n%s", have)
+		}
+	})
+}
+
+func TestEncodeTimeIsZero(t *testing.T) {
+	t.Run("zero time omitempty", func(t *testing.T) {
+		s := struct {
+			T time.Time `toml:"t,omitempty"`
+		}{}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		if have != "" {
+			t.Errorf("expected empty output for zero time.Time with omitempty, got:\n%s", have)
+		}
+	})
+
+	t.Run("non-zero time omitempty", func(t *testing.T) {
+		s := struct {
+			T time.Time `toml:"t,omitempty"`
+		}{time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		want := "t = 2024-01-01T00:00:00Z"
+		if have != want {
+			t.Errorf("\nhave:\n%s\nwant:\n%s", have, want)
+		}
+	})
+
+	t.Run("zero time omitzero", func(t *testing.T) {
+		s := struct {
+			T time.Time `toml:"t,omitzero"`
+		}{}
+		var buf bytes.Buffer
+		if err := NewEncoder(&buf).Encode(s); err != nil {
+			t.Fatal(err)
+		}
+		have := strings.TrimSpace(buf.String())
+		if have != "" {
+			t.Errorf("expected empty output for zero time.Time with omitzero, got:\n%s", have)
+		}
+	})
 }

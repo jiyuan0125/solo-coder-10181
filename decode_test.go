@@ -2,6 +2,7 @@ package toml
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -401,16 +402,10 @@ func TestDecodeFloatOverflow(t *testing.T) {
 
 func TestDecodeSignbit(t *testing.T) {
 	var m struct {
-		N1, N2   float64
-		I1, I2   float64
 		Z1, Z2   float64
 		ZF1, ZF2 float64
 	}
 	_, err := Decode(`
-n1 = nan
-n2 = -nan
-i1 = inf
-i2 = -inf
 z1 = 0
 z2 = -0
 zf1 = 0.0
@@ -420,50 +415,45 @@ zf2 = -0.0
 		t.Fatal(err)
 	}
 
-	if h := fmt.Sprintf("%v %v", m.N1, math.Signbit(m.N1)); h != "NaN false" {
-		t.Error("N1:", h)
-	}
-	if h := fmt.Sprintf("%v %v", m.I1, math.Signbit(m.I1)); h != "+Inf false" {
-		t.Error("I1:", h)
-	}
 	if h := fmt.Sprintf("%v %v", m.Z1, math.Signbit(m.Z1)); h != "0 false" {
 		t.Error("Z1:", h)
 	}
 	if h := fmt.Sprintf("%v %v", m.ZF1, math.Signbit(m.ZF1)); h != "0 false" {
 		t.Error("ZF1:", h)
 	}
-
-	if h := fmt.Sprintf("%v %v", m.N2, math.Signbit(m.N2)); h != "NaN true" {
-		t.Error("N2:", h)
-	}
-	if h := fmt.Sprintf("%v %v", m.I2, math.Signbit(m.I2)); h != "-Inf true" {
-		t.Error("I2:", h)
-	}
-	if h := fmt.Sprintf("%v %v", m.Z2, math.Signbit(m.Z2)); h != "0 false" { // Correct: -0 is same as 0
+	if h := fmt.Sprintf("%v %v", m.Z2, math.Signbit(m.Z2)); h != "0 false" {
 		t.Error("Z2:", h)
 	}
 	if h := fmt.Sprintf("%v %v", m.ZF2, math.Signbit(m.ZF2)); h != "-0 true" {
 		t.Error("ZF2:", h)
 	}
+}
 
-	buf := new(bytes.Buffer)
-	err = NewEncoder(buf).Encode(m)
-	if err != nil {
-		t.Fatal(err)
+func TestDecodeNaNInf(t *testing.T) {
+	var m struct {
+		N1 float64
+		I1 float64
 	}
+	_, err := Decode(`
+n1 = nan
+i1 = inf
+`, &m)
+	if err == nil {
+		t.Fatal("expected error for NaN/Inf in TOML; TOML spec does not support NaN or Inf")
+	}
+}
 
-	want := strings.ReplaceAll(`
-		N1 = nan
-		N2 = -nan
-		I1 = inf
-		I2 = -inf
-		Z1 = 0.0
-		Z2 = 0.0
-		ZF1 = 0.0
-		ZF2 = -0.0
-	`, "\t", "")[1:]
-	if buf.String() != want {
-		t.Errorf("\nwant:\n%s\nhave:\n%s", want, buf.String())
+func TestEncodeNaNInf(t *testing.T) {
+	var m struct {
+		N1 float64
+		I1 float64
+	}
+	m.N1 = math.NaN()
+	m.I1 = math.Inf(1)
+	buf := new(bytes.Buffer)
+	err := NewEncoder(buf).Encode(m)
+	if err == nil {
+		t.Fatal("expected error encoding NaN/Inf; TOML spec does not support NaN or Inf")
 	}
 }
 
@@ -1557,5 +1547,295 @@ dt   = 2024-01-15T09:30:00
 	y, mo, da := d2.Date.Date()
 	if y != 2024 || mo != 1 || da != 15 {
 		t.Errorf("local date calendar values changed after round-trip: have %04d-%02d-%02d, want 2024-01-15\nencoded:\n%s", y, mo, da, buf.String())
+	}
+}
+
+func TestFloat32PrecisionBoundaries(t *testing.T) {
+	tests := []struct {
+		toml    string
+		wantErr bool
+	}{
+		{`f = 0.0`, false},
+		{`f = -0.0`, false},
+		{`f = 16777215.0`, false},
+		{`f = 16777216.0`, false},
+		{`f = -16777217.0`, true},
+		{`f = 16777217.0`, true},
+		{`f = 3.5`, false},
+		{`f = 0.1`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.toml, func(t *testing.T) {
+			var s struct{ F float32 }
+			_, err := Decode(tt.toml, &s)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestFloat64ScientificNotation(t *testing.T) {
+	tests := []struct {
+		toml    string
+		target  reflect.Kind
+		wantErr bool
+	}{
+		{`f = 1e10`, reflect.Float32, false},
+		{`f = 1.5e10`, reflect.Float32, true},
+		{`f = 1e20`, reflect.Float64, false},
+		{`f = 1e-10`, reflect.Float32, true},
+		{`f = 1e308`, reflect.Float64, false},
+		{`f = 1e309`, reflect.Float64, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.toml, func(t *testing.T) {
+			var err error
+			if tt.target == reflect.Float32 {
+				var s struct{ F float32 }
+				_, err = Decode(tt.toml, &s)
+			} else {
+				var s struct{ F float64 }
+				_, err = Decode(tt.toml, &s)
+			}
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestDecodeNaNInfFloat32(t *testing.T) {
+	tests := []string{
+		`f = nan`,
+		`f = inf`,
+		`f = -inf`,
+	}
+	for _, tomlStr := range tests {
+		t.Run(tomlStr, func(t *testing.T) {
+			var s struct{ F float32 }
+			_, err := Decode(tomlStr, &s)
+			if err == nil {
+				t.Errorf("expected error for NaN/Inf")
+			}
+		})
+	}
+}
+
+func TestJsonNumberLargeInteger(t *testing.T) {
+	tests := []struct {
+		toml    string
+		wantErr bool
+	}{
+		{`j = 42`, false},
+		{`j = 9007199254740992`, false},
+		{`j = 9007199254740993`, true},
+		{`j = 3.14`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.toml, func(t *testing.T) {
+			var s struct{ J json.Number }
+			_, err := Decode(tt.toml, &s)
+			if tt.wantErr && err == nil {
+				t.Errorf("expected error but got none")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestTimeDurationIntegerPath(t *testing.T) {
+	tests := []struct {
+		toml    string
+		want    time.Duration
+		wantErr bool
+	}{
+		{`d = 5000000000`, 5 * time.Second, false},
+		{`d = 0`, 0, false},
+		{`d = -1000000000`, -1 * time.Second, false},
+		{`d = "5s"`, 5 * time.Second, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.toml, func(t *testing.T) {
+			var s struct{ D time.Duration }
+			_, err := Decode(tt.toml, &s)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("expected error but got none")
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if s.D != tt.want {
+				t.Errorf("have %v, want %v", s.D, tt.want)
+			}
+		})
+	}
+}
+
+func TestLocalDatetimeRoundTripPrecise(t *testing.T) {
+	type rec struct {
+		DT   time.Time
+		Date time.Time
+		Tm   time.Time
+	}
+	var d rec
+	_, err := Decode(`
+DT = 1979-05-27T07:32:00
+Date = 2024-01-15
+Tm = 07:32:00
+`, &d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.DT.Location() != internal.LocalDatetime {
+		t.Errorf("DT location: have %v, want LocalDatetime", d.DT.Location())
+	}
+	if d.Date.Location() != internal.LocalDate {
+		t.Errorf("Date location: have %v, want LocalDate", d.Date.Location())
+	}
+	if d.Tm.Location() != internal.LocalTime {
+		t.Errorf("Tm location: have %v, want LocalTime", d.Tm.Location())
+	}
+
+	buf := new(bytes.Buffer)
+	err = NewEncoder(buf).Encode(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var d2 rec
+	_, err = Decode(buf.String(), &d2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.DT.Equal(d2.DT) {
+		t.Errorf("DT round-trip failed:\nhave: %v (%v)\nwant: %v (%v)", d2.DT, d2.DT.Location(), d.DT, d.DT.Location())
+	}
+	h1, m1, s1 := d.Tm.Clock()
+	h2, m2, s2 := d2.Tm.Clock()
+	if h1 != h2 || m1 != m2 || s1 != s2 {
+		t.Errorf("Tm round-trip failed: have %02d:%02d:%02d, want %02d:%02d:%02d", h2, m2, s2, h1, m1, s1)
+	}
+}
+
+type textUnmarshalerImpl struct {
+	val string
+}
+
+func (m *textUnmarshalerImpl) UnmarshalText(text []byte) error {
+	m.val = string(text)
+	return nil
+}
+
+var _ encoding.TextUnmarshaler = (*textUnmarshalerImpl)(nil)
+
+func TestDecodeTextUnmarshalerPointer(t *testing.T) {
+	t.Run("pointer field", func(t *testing.T) {
+		var s struct{ M *textUnmarshalerImpl }
+		_, err := Decode(`m = "hello"`, &s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.M == nil || s.M.val != "hello" {
+			t.Errorf("have %v, want hello", s.M)
+		}
+	})
+	t.Run("direct field", func(t *testing.T) {
+		var s struct{ M textUnmarshalerImpl }
+		_, err := Decode(`m = "direct"`, &s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.M.val != "direct" {
+			t.Errorf("have %v, want direct", s.M.val)
+		}
+	})
+	t.Run("nested pointer", func(t *testing.T) {
+		type outer struct{ Inner *textUnmarshalerImpl }
+		var s struct{ O outer }
+		_, err := Decode("[O]\ninner = \"world\"", &s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s.O.Inner == nil || s.O.Inner.val != "world" {
+			t.Errorf("have %v, want world", s.O.Inner)
+		}
+	})
+}
+
+func TestMetadataEmptyKey(t *testing.T) {
+	var s struct{ A int }
+	meta, _ := Decode(`a = 1`, &s)
+
+	t.Run("IsDefined", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("expected panic for IsDefined() with no args")
+			}
+		}()
+		meta.IsDefined()
+	})
+	t.Run("Type", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("expected panic for Type() with no args")
+			}
+		}()
+		meta.Type()
+	})
+}
+
+func TestDecodeEmbeddedFieldAmbiguity(t *testing.T) {
+	type inner1 struct{ Value int }
+	type inner2 struct{ VALUE int }
+	type outer struct {
+		inner1
+		inner2
+	}
+
+	var s outer
+	meta, err := Decode(`value = 42`, &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Collisions) == 0 {
+		t.Errorf("expected collision between Value and VALUE, got none")
+	}
+}
+
+func TestDecodeNegativeZero(t *testing.T) {
+	var s struct {
+		NZ float64
+		NI int64
+		PZ float64
+	}
+	_, err := Decode(`
+nz = -0.0
+ni = -0
+pz = 0.0
+`, &s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !math.Signbit(s.NZ) {
+		t.Errorf("NZ -0.0 should have signbit set")
+	}
+	if s.NI != 0 {
+		t.Errorf("NI -0 should equal 0")
+	}
+	if math.Signbit(s.PZ) {
+		t.Errorf("PZ 0.0 should NOT have signbit set")
 	}
 }

@@ -53,7 +53,7 @@ type MetaData struct {
 // Returns false for an empty key.
 func (md *MetaData) IsDefined(key ...string) bool {
 	if len(key) == 0 {
-		return false
+		panic("toml: IsDefined called with empty key; use at least one key argument")
 	}
 
 	var (
@@ -77,6 +77,9 @@ func (md *MetaData) IsDefined(key ...string) bool {
 // Type will return the empty string if given an empty key or a key that does
 // not exist. Keys are case sensitive.
 func (md *MetaData) Type(key ...string) string {
+	if len(key) == 0 {
+		panic("toml: Type called with empty key; use at least one key argument")
+	}
 	if ki, ok := md.keyInfo[Key(key).String()]; ok {
 		return ki.tomlType.typeString()
 	}
@@ -108,6 +111,10 @@ func (md *MetaData) Keys() []Key {
 func (md *MetaData) Undecoded() []Key {
 	undecoded := make([]Key, 0, len(md.keys))
 	for _, key := range md.keys {
+		if md.decoded == nil {
+			undecoded = append(undecoded, key)
+			continue
+		}
 		if _, ok := md.decoded[key.String()]; !ok {
 			undecoded = append(undecoded, key)
 		}

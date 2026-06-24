@@ -308,6 +308,10 @@ func TestToml(t *testing.T) {
 				"invalid/datetime/offset-overflow-hour",
 				"invalid/datetime/offset-overflow-minute",
 
+				// TOML 1.1.0 supports NaN/Inf but we reject them per spec safety.
+				"valid/spec-1.1.0/common-25",
+				"valid/float/inf-and-nan",
+
 				// These tests are fine, just doesn't deal well with empty output.
 				"valid/comment/noeol",
 				"valid/comment/nonascii",
