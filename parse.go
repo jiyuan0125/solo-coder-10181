@@ -360,6 +360,7 @@ func (p *parser) valueDatetime(it item) (any, tomlType) {
 	it.val = datetimeRepl.Replace(it.val)
 	var (
 		t   time.Time
+		tt  tomlType
 		ok  bool
 		err error
 	)
@@ -370,13 +371,31 @@ func (p *parser) valueDatetime(it item) (any, tomlType) {
 				p.panicErr(it, errParseDate{it.val})
 			}
 			ok = true
+			tt = p.typeOfPrimitive(it)
+			if dt.zone == time.Local {
+				_, offset := t.Zone()
+				if strings.HasSuffix(it.val, "Z") || strings.HasSuffix(it.val, "-00:00") || strings.HasSuffix(it.val, "+00:00") {
+					t = t.In(time.UTC)
+				} else if offset != 0 {
+					sign := "+"
+					abs := offset
+					if offset < 0 {
+						sign = "-"
+						abs = -offset
+					}
+					hh := abs / 3600
+					mm := (abs % 3600) / 60
+					name := fmt.Sprintf("%s%02d:%02d", sign, hh, mm)
+					t = t.In(time.FixedZone(name, offset))
+				}
+			}
 			break
 		}
 	}
 	if !ok {
 		p.panicErr(it, errParseDate{it.val})
 	}
-	return t, p.typeOfPrimitive(it)
+	return t, tt
 }
 
 // Go's time.Parse() will accept numbers without a leading zero; there isn't any

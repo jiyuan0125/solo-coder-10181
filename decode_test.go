@@ -1780,20 +1780,14 @@ func TestMetadataEmptyKey(t *testing.T) {
 	meta, _ := Decode(`a = 1`, &s)
 
 	t.Run("IsDefined", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Errorf("expected panic for IsDefined() with no args")
-			}
-		}()
-		meta.IsDefined()
+		if meta.IsDefined() != false {
+			t.Errorf("IsDefined() should return false for empty key")
+		}
 	})
 	t.Run("Type", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Errorf("expected panic for Type() with no args")
-			}
-		}()
-		meta.Type()
+		if meta.Type() != "" {
+			t.Errorf("Type() should return empty string for empty key")
+		}
 	})
 }
 
@@ -1806,12 +1800,59 @@ func TestDecodeEmbeddedFieldAmbiguity(t *testing.T) {
 	}
 
 	var s outer
-	meta, err := Decode(`value = 42`, &s)
-	if err != nil {
-		t.Fatal(err)
+	_, err := Decode(`value = 42`, &s)
+	if err == nil {
+		t.Fatal("expected error for ambiguous case-insensitive match")
 	}
-	if len(meta.Collisions) == 0 {
-		t.Errorf("expected collision between Value and VALUE, got none")
+	if !strings.Contains(err.Error(), "ambiguous") {
+		t.Errorf("error should mention ambiguous, got: %v", err)
+	}
+}
+
+func TestFixedZoneTimeRoundTrip(t *testing.T) {
+	type rec struct {
+		T time.Time
+	}
+	tests := []string{
+		`t = 2024-01-15T10:30:00+05:30`,
+		`t = 2024-01-15T10:30:00+08:00`,
+		`t = 2024-01-15T10:30:00-05:00`,
+		`t = 2024-01-15T10:30:00Z`,
+	}
+	for _, tomlStr := range tests {
+		t.Run(tomlStr, func(t *testing.T) {
+			var d rec
+			_, err := Decode(tomlStr, &d)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loc1 := d.T.Location().String()
+			_, off1Sec := d.T.Zone()
+
+			buf := new(bytes.Buffer)
+			err = NewEncoder(buf).Encode(d)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var d2 rec
+			_, err = Decode(buf.String(), &d2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			loc2 := d2.T.Location().String()
+			_, off2Sec := d2.T.Zone()
+
+			if loc1 != loc2 {
+				t.Errorf("location not preserved: have %q, want %q", loc2, loc1)
+			}
+			if off1Sec != off2Sec {
+				t.Errorf("offset not preserved: have %d, want %d", off2Sec, off1Sec)
+			}
+			if !d.T.Equal(d2.T) {
+				t.Errorf("time not preserved: have %v, want %v", d2.T, d.T)
+			}
+		})
 	}
 }
 

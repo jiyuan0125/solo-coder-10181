@@ -296,14 +296,32 @@ func (enc *Encoder) eElement(rv reflect.Value) {
 		enc.write(strconv.FormatUint(rv.Uint(), 10))
 	case reflect.Float32:
 		f := rv.Float()
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			encPanic(fmt.Errorf("toml: NaN and Inf cannot be encoded to TOML"))
+		if math.IsNaN(f) {
+			if math.Signbit(f) {
+				encPanic(fmt.Errorf("toml: -NaN cannot be encoded to TOML"))
+			}
+			encPanic(fmt.Errorf("toml: NaN cannot be encoded to TOML"))
+		}
+		if math.IsInf(f, 0) {
+			if math.IsInf(f, +1) {
+				encPanic(fmt.Errorf("toml: +Inf cannot be encoded to TOML"))
+			}
+			encPanic(fmt.Errorf("toml: -Inf cannot be encoded to TOML"))
 		}
 		enc.write(floatAddDecimal(strconv.FormatFloat(f, 'g', -1, 32)))
 	case reflect.Float64:
 		f := rv.Float()
-		if math.IsNaN(f) || math.IsInf(f, 0) {
-			encPanic(fmt.Errorf("toml: NaN and Inf cannot be encoded to TOML"))
+		if math.IsNaN(f) {
+			if math.Signbit(f) {
+				encPanic(fmt.Errorf("toml: -NaN cannot be encoded to TOML"))
+			}
+			encPanic(fmt.Errorf("toml: NaN cannot be encoded to TOML"))
+		}
+		if math.IsInf(f, 0) {
+			if math.IsInf(f, +1) {
+				encPanic(fmt.Errorf("toml: +Inf cannot be encoded to TOML"))
+			}
+			encPanic(fmt.Errorf("toml: -Inf cannot be encoded to TOML"))
 		}
 		enc.write(floatAddDecimal(strconv.FormatFloat(f, 'g', -1, 64)))
 	case reflect.Array, reflect.Slice:

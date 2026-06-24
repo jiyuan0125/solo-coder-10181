@@ -1467,38 +1467,40 @@ func TestOmitEmptyAlignedWithOmitZero(t *testing.T) {
 }
 
 // TestUnifyStructStableCaseInsensitiveMatch verifies that when multiple struct
-// fields case-insensitively match the same TOML key, the selection is stable
-// across repeated runs (no random map-iteration order leakage).
+// fields case-insensitively match the same TOML key, the decoder returns a
+// clear ambiguous-match error instead of silently picking one (which would be
+// non-deterministic and lose data).
 func TestUnifyStructStableCaseInsensitiveMatch(t *testing.T) {
-	// Two struct fields whose TOML names differ only by case. Without the sort
-	// fix, which field ends up receiving the value is non-deterministic.
 	type T struct {
-		FooBar int // matches via case-insensitive fallback
-		FOOBAR int // exact match for "FOOBAR"; but TOML input has lowercase "foobar"
+		FooBar int
+		FOOBAR int
 	}
 
-	// Run many iterations: if the match is deterministic we'll always land on
-	// the same field. If it's random we'll see variation within ~100 runs with
-	// very high probability (map iteration order is explicitly randomised).
-	observed := make(map[int]int)
-	for i := 0; i < 200; i++ {
+	for i := 0; i < 10; i++ {
 		var tgt T
 		_, err := Decode("foobar = 7", &tgt)
-		if err != nil {
-			t.Fatalf("Decode failed: %s", err)
+		if err == nil {
+			t.Fatalf("expected error for ambiguous case-insensitive match, got none (FooBar=%d FOOBAR=%d)", tgt.FooBar, tgt.FOOBAR)
 		}
-		// Encode which fields received the value as a bitmask.
-		mask := 0
-		if tgt.FooBar == 7 {
-			mask |= 1
+		if !strings.Contains(err.Error(), "ambiguous") {
+			t.Errorf("error should mention 'ambiguous', got: %v", err)
 		}
-		if tgt.FOOBAR == 7 {
-			mask |= 2
-		}
-		observed[mask]++
 	}
-	if len(observed) != 1 {
-		t.Errorf("case-insensitive field match was non-deterministic; observed masks: %v", observed)
+
+	type T2 struct {
+		ExactMatch int `toml:"foobar"`
+		FooBar     int
+	}
+	var tgt2 T2
+	_, err := Decode("foobar = 7", &tgt2)
+	if err != nil {
+		t.Fatalf("exact tag match should not trigger ambiguity error: %v", err)
+	}
+	if tgt2.ExactMatch != 7 {
+		t.Errorf("expected ExactMatch=7, got %d", tgt2.ExactMatch)
+	}
+	if tgt2.FooBar != 0 {
+		t.Errorf("expected FooBar=0 (unset), got %d", tgt2.FooBar)
 	}
 }
 
@@ -1507,24 +1509,33 @@ func TestEncodeNaNInfFloat32(t *testing.T) {
 		F float32 `toml:"f"`
 	}{float32(math.NaN())}
 	var buf bytes.Buffer
-	if err := NewEncoder(&buf).Encode(s1); err == nil {
+	err := NewEncoder(&buf).Encode(s1)
+	if err == nil {
 		t.Error("expected error encoding float32 NaN")
+	} else if !strings.Contains(err.Error(), "NaN") {
+		t.Errorf("error should mention NaN, got: %v", err)
 	}
 
 	buf.Reset()
 	s2 := struct {
 		F float32 `toml:"f"`
 	}{float32(math.Inf(1))}
-	if err := NewEncoder(&buf).Encode(s2); err == nil {
+	err = NewEncoder(&buf).Encode(s2)
+	if err == nil {
 		t.Error("expected error encoding float32 +Inf")
+	} else if !strings.Contains(err.Error(), "+Inf") {
+		t.Errorf("error should mention +Inf, got: %v", err)
 	}
 
 	buf.Reset()
 	s3 := struct {
 		F float32 `toml:"f"`
 	}{float32(math.Inf(-1))}
-	if err := NewEncoder(&buf).Encode(s3); err == nil {
+	err = NewEncoder(&buf).Encode(s3)
+	if err == nil {
 		t.Error("expected error encoding float32 -Inf")
+	} else if !strings.Contains(err.Error(), "-Inf") {
+		t.Errorf("error should mention -Inf, got: %v", err)
 	}
 }
 
@@ -1533,24 +1544,33 @@ func TestEncodeNaNInfFloat64(t *testing.T) {
 		F float64 `toml:"f"`
 	}{math.NaN()}
 	var buf bytes.Buffer
-	if err := NewEncoder(&buf).Encode(s1); err == nil {
+	err := NewEncoder(&buf).Encode(s1)
+	if err == nil {
 		t.Error("expected error encoding float64 NaN")
+	} else if !strings.Contains(err.Error(), "NaN") {
+		t.Errorf("error should mention NaN, got: %v", err)
 	}
 
 	buf.Reset()
 	s2 := struct {
 		F float64 `toml:"f"`
 	}{math.Inf(1)}
-	if err := NewEncoder(&buf).Encode(s2); err == nil {
+	err = NewEncoder(&buf).Encode(s2)
+	if err == nil {
 		t.Error("expected error encoding float64 +Inf")
+	} else if !strings.Contains(err.Error(), "+Inf") {
+		t.Errorf("error should mention +Inf, got: %v", err)
 	}
 
 	buf.Reset()
 	s3 := struct {
 		F float64 `toml:"f"`
 	}{math.Inf(-1)}
-	if err := NewEncoder(&buf).Encode(s3); err == nil {
+	err = NewEncoder(&buf).Encode(s3)
+	if err == nil {
 		t.Error("expected error encoding float64 -Inf")
+	} else if !strings.Contains(err.Error(), "-Inf") {
+		t.Errorf("error should mention -Inf, got: %v", err)
 	}
 }
 

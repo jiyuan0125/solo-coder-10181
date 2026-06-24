@@ -47,13 +47,15 @@ type MetaData struct {
 
 // IsDefined reports if the key exists in the TOML data.
 //
+// IsDefined reports whether the specified key exists in the parsed TOML.
+//
 // The key should be specified hierarchically, for example to access the TOML
 // key "a.b.c" you would use IsDefined("a", "b", "c"). Keys are case sensitive.
 //
 // Returns false for an empty key.
 func (md *MetaData) IsDefined(key ...string) bool {
 	if len(key) == 0 {
-		panic("toml: IsDefined called with empty key; use at least one key argument")
+		return false
 	}
 
 	var (
@@ -78,7 +80,7 @@ func (md *MetaData) IsDefined(key ...string) bool {
 // not exist. Keys are case sensitive.
 func (md *MetaData) Type(key ...string) string {
 	if len(key) == 0 {
-		panic("toml: Type called with empty key; use at least one key argument")
+		return ""
 	}
 	if ki, ok := md.keyInfo[Key(key).String()]; ok {
 		return ki.tomlType.typeString()

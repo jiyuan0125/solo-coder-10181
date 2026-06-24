@@ -386,14 +386,12 @@ func (md *MetaData) unifyStruct(mapping any, rv reflect.Value) error {
 			f = caseFoldCandidates[0]
 		}
 		if f == nil && len(caseFoldCandidates) > 1 {
-			if _, ok := collisionsByLowerName[strings.ToLower(key)]; !ok {
-				md.Collisions = append(md.Collisions, FieldCollision{
-					Key:        md.context.add(key).String(),
-					StructType: structName,
-					FieldName:  caseFoldCandidates[0].name,
-					Dropped:    len(caseFoldCandidates),
-				})
+			names := make([]string, 0, len(caseFoldCandidates))
+			for _, c := range caseFoldCandidates {
+				names = append(names, c.name)
 			}
+			return md.e("ambiguous key %q: multiple fields in %s match case-insensitively: %s",
+				key, structName, strings.Join(names, ", "))
 		}
 		if f != nil {
 			subv := rv
