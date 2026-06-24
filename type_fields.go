@@ -9,15 +9,17 @@ package toml
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 )
 
 // A field represents a single field found in a struct.
 type field struct {
-	name  string       // the name of the field (`toml` tag included)
-	tag   bool         // whether field has a `toml` tag
-	index []int        // represents the depth of an anonymous field
-	typ   reflect.Type // the type of the field
+	name      string       // the name of the field (`toml` tag included)
+	tag       bool         // whether field has a `toml` tag
+	index     []int        // represents the depth of an anonymous field
+	typ       reflect.Type // the type of the field
+	lowerName string       // lowercase name, used for case-insensitive comparison
 }
 
 // byName sorts field by name, breaking ties with depth,
@@ -28,8 +30,8 @@ type byName []field
 func (x byName) Len() int      { return len(x) }
 func (x byName) Swap(i, j int) { x[i], x[j] = x[j], x[i] }
 func (x byName) Less(i, j int) bool {
-	if x[i].name != x[j].name {
-		return x[i].name < x[j].name
+	if x[i].lowerName != x[j].lowerName {
+		return x[i].lowerName < x[j].lowerName
 	}
 	if len(x[i].index) != len(x[j].index) {
 		return len(x[i].index) < len(x[j].index)
@@ -58,9 +60,9 @@ func (x byIndex) Less(i, j int) bool {
 }
 
 // fieldCollision records when multiple struct fields share the same TOML name
-// and cannot be resolved by Go's embedding rules, causing all candidates to
-// be silently dropped. This information is surfaced during decoding so users
-// know why their fields are missing.
+// (case-insensitive) and cannot be resolved by Go's embedding rules, causing
+// all candidates to be silently dropped. This information is surfaced during
+// decoding so users know why their fields are missing.
 type fieldCollision struct {
 	name          string // the TOML field name (case-insensitive match target)
 	candidateType string // the parent struct type where the collision occurred
@@ -129,7 +131,7 @@ func typeFields(t reflect.Type) typeFieldsResult {
 					if name == "" {
 						name = sf.Name
 					}
-					fields = append(fields, field{name, tagged, index, ft})
+					fields = append(fields, field{name, tagged, index, ft, strings.ToLower(name)})
 					if count[f.typ] > 1 {
 						// If there were multiple instances, add a second,
 						// so that the annihilation code will see a duplicate.
@@ -143,7 +145,7 @@ func typeFields(t reflect.Type) typeFieldsResult {
 				// Record new anonymous struct to explore in next round.
 				nextCount[ft]++
 				if nextCount[ft] == 1 {
-					f := field{name: ft.Name(), index: index, typ: ft}
+					f := field{name: ft.Name(), index: index, typ: ft, lowerName: strings.ToLower(ft.Name())}
 					next = append(next, f)
 				}
 			}
@@ -155,23 +157,23 @@ func typeFields(t reflect.Type) typeFieldsResult {
 	// Delete all fields that are hidden by the Go rules for embedded fields,
 	// except that fields with TOML tags are promoted.
 
-	// The fields are sorted in primary order of name, secondary order
+	// The fields are sorted in primary order of lowercase name, secondary order
 	// of field index length. Loop over names; for each name, delete
 	// hidden fields by choosing the one dominant field that survives.
 	var collisions []fieldCollision
 	out := fields[:0]
 	for advance, i := 0, 0; i < len(fields); i += advance {
-		// One iteration per name.
-		// Find the sequence of fields with the name of this first field.
+		// One iteration per name (case-insensitive).
+		// Find the sequence of fields with the lowercased name of this first field.
 		fi := fields[i]
-		name := fi.name
+		name := fi.lowerName
 		for advance = 1; i+advance < len(fields); advance++ {
 			fj := fields[i+advance]
-			if fj.name != name {
+			if fj.lowerName != name {
 				break
 			}
 		}
-		if advance == 1 { // Only one field with this name
+		if advance == 1 { // Only one field with this (lowercased) name
 			out = append(out, fi)
 			continue
 		}
@@ -180,7 +182,7 @@ func typeFields(t reflect.Type) typeFieldsResult {
 			out = append(out, dominant)
 			if dropped > 0 {
 				collisions = append(collisions, fieldCollision{
-					name:          name,
+					name:          fi.name,
 					candidateType: t.String(),
 					count:         dropped,
 				})
@@ -188,7 +190,7 @@ func typeFields(t reflect.Type) typeFieldsResult {
 		} else {
 			// All candidates were dropped due to a tie at the same level.
 			collisions = append(collisions, fieldCollision{
-				name:          name,
+				name:          fi.name,
 				candidateType: t.String(),
 				count:         dropped,
 			})
@@ -202,7 +204,7 @@ func typeFields(t reflect.Type) typeFieldsResult {
 }
 
 // dominantField looks through the fields, all of which are known to
-// have the same name, to find the single field that dominates the
+// have the same lowercased name, to find the single field that dominates the
 // others using Go's embedding rules, modified by the presence of
 // TOML tags. If there are multiple top-level fields, the boolean
 // will be false: This condition is an error in Go and we skip all
@@ -223,7 +225,8 @@ func dominantField(fields []field) (field, bool, int) {
 		}
 		if f.tag {
 			if tagged >= 0 {
-				// Multiple tagged fields at the same level: conflict.
+				// Multiple tagged fields at the same level: conflict
+				// (even if their tag names differ only by case).
 				// Return no field, reporting all candidates dropped.
 				return field{}, false, len(fields)
 			}
@@ -234,8 +237,8 @@ func dominantField(fields []field) (field, bool, int) {
 		return fields[tagged], true, len(fields) - 1
 	}
 	// All remaining fields have the same length. If there's more than one,
-	// we have a conflict (two fields named "X" at the same level) and we
-	// return no field.
+	// we have a conflict (two fields whose names match case-insensitively
+	// at the same level) and we return no field.
 	if len(fields) > 1 {
 		return field{}, false, len(fields)
 	}

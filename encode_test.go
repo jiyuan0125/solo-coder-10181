@@ -1494,3 +1494,273 @@ func TestUnifyStructStableCaseInsensitiveMatch(t *testing.T) {
 		t.Errorf("case-insensitive field match was non-deterministic; observed masks: %v", observed)
 	}
 }
+
+// --- omitzero comprehensive coverage tests ---
+
+// uncomparableStruct is a struct containing a slice (uncomparable type), so the
+// struct itself cannot be compared with ==. Used to test the non-comparable
+// struct branch of isZero.
+type uncomparableStruct struct {
+	Items []int
+}
+
+// TestOmitZeroComprehensive verifies that omitzero correctly recognises the
+// zero value for every reflect.Kind family that TOML encoding touches. The
+// key semantic difference vs omitempty is that NON-NIL but empty slices/maps
+// are NOT omitted by omitzero (they're not the type's zero value).
+func TestOmitZeroComprehensive(t *testing.T) {
+	nonZero := 123
+
+	type AllKinds struct {
+		// --- Numeric zeroes should be omitted ---
+		Int        int        `toml:"int,omitempty,omitzero"`
+		Int8       int8       `toml:"int8,omitempty,omitzero"`
+		Int16      int16      `toml:"int16,omitempty,omitzero"`
+		Int32      int32      `toml:"int32,omitempty,omitzero"`
+		Int64      int64      `toml:"int64,omitempty,omitzero"`
+		Uint       uint       `toml:"uint,omitempty,omitzero"`
+		Uint8      uint8      `toml:"uint8,omitempty,omitzero"`
+		Uint16     uint16     `toml:"uint16,omitempty,omitzero"`
+		Uint32     uint32     `toml:"uint32,omitempty,omitzero"`
+		Uint64     uint64     `toml:"uint64,omitempty,omitzero"`
+		Float32    float32    `toml:"float32,omitempty,omitzero"`
+		Float64    float64    `toml:"float64,omitempty,omitzero"`
+		// --- Non-numeric types' zeroes should ALSO be omitted now ---
+		Bool       bool       `toml:"bool,omitempty,omitzero"`
+		String     string     `toml:"string,omitempty,omitzero"`
+		// --- nil pointer / nil slice / nil map should be omitted (zero value) ---
+		PtrNil     *int       `toml:"ptr_nil,omitempty,omitzero"`
+		SliceNil   []int      `toml:"slice_nil,omitempty,omitzero"`
+		MapNil     map[string]int `toml:"map_nil,omitempty,omitzero"`
+		// --- NON-NIL but empty slice/map: SHOULD be KEPT by omitzero because
+		//     they are NOT the type's zero value (the zero value is nil).
+		//     NOTE: only omitzero, NOT omitempty — otherwise omitempty's len==0
+		//     check would drop them before omitzero ever gets consulted. ---
+		SliceEmpty []int               `toml:"slice_empty,omitzero"`
+		MapEmpty   map[string]int      `toml:"map_empty,omitzero"`
+		// --- Comparable vs non-comparable struct zeroes ---
+		CompZero   struct{ X, Y int }  `toml:"comp_zero,omitempty,omitzero"`
+		UncmpZero  uncomparableStruct  `toml:"uncmp_zero,omitempty,omitzero"`
+		// --- Non-zero counterparts: all MUST appear in output ---
+		IntNZ      int                 `toml:"int_nz,omitempty,omitzero"`
+		BoolNZ     bool                `toml:"bool_nz,omitempty,omitzero"`
+		StringNZ   string              `toml:"string_nz,omitempty,omitzero"`
+		PtrNZ      *int                `toml:"ptr_nz,omitempty,omitzero"`
+		SliceNZ    []int               `toml:"slice_nz,omitempty,omitzero"`
+		MapNZ      map[string]int      `toml:"map_nz,omitempty,omitzero"`
+		CompNZ     struct{ X, Y int }  `toml:"comp_nz,omitempty,omitzero"`
+		UncmpNZ    uncomparableStruct  `toml:"uncmp_nz,omitempty,omitzero"`
+		// --- Fixed-size array zero vs non-zero ---
+		ArrZero    [3]int              `toml:"arr_zero,omitempty,omitzero"`
+		ArrNZ      [3]int              `toml:"arr_nz,omitempty,omitzero"`
+	}
+
+	in := AllKinds{
+		// ---- Omits (zero values) ----
+		Int: 0, Int8: 0, Int16: 0, Int32: 0, Int64: 0,
+		Uint: 0, Uint8: 0, Uint16: 0, Uint32: 0, Uint64: 0,
+		Float32: 0, Float64: 0,
+		Bool:   false,
+		String: "",
+		PtrNil:   nil,
+		SliceNil: nil,
+		MapNil:   nil,
+		// ---- KEPT by omitzero (non-nil but empty containers) ----
+		SliceEmpty: make([]int, 0),
+		MapEmpty:   make(map[string]int),
+		// ---- Omits (zero structs, comparable + uncomparable) ----
+		CompZero:  struct{ X, Y int }{},
+		UncmpZero: uncomparableStruct{Items: nil},
+		// ---- Non-zero MUST appear ----
+		IntNZ:    7,
+		BoolNZ:   true,
+		StringNZ: "hi",
+		PtrNZ:    &nonZero,
+		SliceNZ:  []int{1, 2},
+		MapNZ:    map[string]int{"k": 1},
+		CompNZ:   struct{ X, Y int }{X: 10, Y: 20},
+		UncmpNZ:  uncomparableStruct{Items: []int{99}},
+		ArrZero:  [3]int{0, 0, 0},
+		ArrNZ:    [3]int{1, 2, 3},
+	}
+
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(in); err != nil {
+		t.Fatalf("Encode failed: %s", err)
+	}
+	got := buf.String()
+
+	omitted := []string{
+		"int =", "int8 =", "int16 =", "int32 =", "int64 =",
+		"uint =", "uint8 =", "uint16 =", "uint32 =", "uint64 =",
+		"float32 =", "float64 =",
+		"bool = 0", "bool = false",
+		`string = ""`,
+		"ptr_nil =", "slice_nil =", "map_nil =",
+		"comp_zero =", "uncmp_zero =",
+		"arr_zero =",
+	}
+	for _, prefix := range omitted {
+		if strings.Contains(got, prefix) {
+			t.Errorf("omitzero should have omitted %q\nOutput:\n%s", prefix, got)
+		}
+	}
+
+	// ---- slice_empty / map_empty must NOT be omitted (omitzero only drops nil) ----
+	// Note: empty map is encoded as a section header [map_empty] (inline form is
+	// not the default for non-inline tables). Empty slice remains inline [].
+	mustKeep := []string{
+		`slice_empty = []`,
+		`[map_empty]`,
+	}
+	for _, substr := range mustKeep {
+		if !strings.Contains(got, substr) {
+			t.Errorf("omitzero should KEEP non-nil empty container %q (not the zero value)\nOutput:\n%s", substr, got)
+		}
+	}
+
+	// ---- Non-zero fields must all be present ----
+	// comp_nz is written as a [comp_nz] table section (not inline).
+	present := []string{
+		"int_nz = 7",
+		"bool_nz = true",
+		`string_nz = "hi"`,
+		"ptr_nz = 123",
+		"slice_nz = [1, 2]",
+		"[comp_nz]",
+		"X = 10",
+		"Y = 20",
+		"arr_nz = [1, 2, 3]",
+	}
+	for _, substr := range present {
+		if !strings.Contains(got, substr) {
+			t.Errorf("expected non-zero field %q in output, but it was missing\nOutput:\n%s", substr, got)
+		}
+	}
+	_ = in.UncmpNZ // silence unused warning
+}
+
+// TestOmitZeroVersusOmitEmptySemantics codifies the exact boundary between
+// omitzero and omitempty for slice/map container types:
+//   - omitzero drops ONLY nil (the reflect.Zero value); non-nil empty kept.
+//   - omitempty drops anything with len 0 (nil OR non-nil empty).
+func TestOmitZeroVersusOmitEmptySemantics(t *testing.T) {
+	type S struct {
+		// With omitzero only: keep these (non-nil empty is NOT a type zero value).
+		// NOTE: no omitempty — otherwise omitempty's len==0 check would drop them first.
+		SliceOmitZeroEmpty []int          `toml:"slice_oz_empty,omitzero"`
+		MapOmitZeroEmpty   map[string]int `toml:"map_oz_empty,omitzero"`
+		// With omitempty: drop these (len == 0 regardless of nil-ness).
+		SliceOmitEmptyEmpty []int          `toml:"slice_oe_empty,omitempty"`
+		MapOmitEmptyEmpty   map[string]int `toml:"map_oe_empty,omitempty"`
+	}
+
+	in := S{
+		SliceOmitZeroEmpty: make([]int, 0),
+		MapOmitZeroEmpty:   make(map[string]int),
+		SliceOmitEmptyEmpty: make([]int, 0),
+		MapOmitEmptyEmpty:   make(map[string]int),
+	}
+
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(in); err != nil {
+		t.Fatalf("Encode failed: %s", err)
+	}
+	got := buf.String()
+
+	// omitzero path: non-nil empty containers KEPT
+	// Note: empty map defaults to section form [map_oz_empty], not inline {}.
+	if !strings.Contains(got, `slice_oz_empty = []`) {
+		t.Errorf("omitzero should keep non-nil empty slice\nOutput:\n%s", got)
+	}
+	if !strings.Contains(got, `[map_oz_empty]`) {
+		t.Errorf("omitzero should keep non-nil empty map\nOutput:\n%s", got)
+	}
+	// omitempty path: anything len==0 DROPPED
+	if strings.Contains(got, `slice_oe_empty`) {
+		t.Errorf("omitempty should drop len==0 slice\nOutput:\n%s", got)
+	}
+	if strings.Contains(got, `map_oe_empty`) {
+		t.Errorf("omitempty should drop len==0 map\nOutput:\n%s", got)
+	}
+}
+
+// --- MarshalTOML priority over TextMarshaler on the encoding side ---
+
+type bothMarshalAndText struct {
+	Value int
+}
+
+func (b bothMarshalAndText) MarshalTOML() ([]byte, error) {
+	// Format as a custom inline TOML value.
+	return []byte(fmt.Sprintf(`"{val:%d}"`, b.Value)), nil
+}
+
+func (b bothMarshalAndText) MarshalText() ([]byte, error) {
+	// This should NOT be called when MarshalTOML is present.
+	return []byte(fmt.Sprintf("TEXT:%d", b.Value)), nil
+}
+
+func TestMarshalTOMLTakesPriorityOverText(t *testing.T) {
+	type S struct {
+		V bothMarshalAndText `toml:"v"`
+	}
+	in := S{V: bothMarshalAndText{Value: 42}}
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).Encode(in); err != nil {
+		t.Fatalf("Encode failed: %s", err)
+	}
+	got := buf.String()
+	// MarshalTOML output should contain the {val:42} format we produced.
+	if !strings.Contains(got, "{val:42}") {
+		t.Errorf("expected MarshalTOML output (containing {val:42}), got:\n%s", got)
+	}
+	// TextMarshaler output "TEXT:42" must NOT appear.
+	if strings.Contains(got, "TEXT:42") {
+		t.Errorf("TextMarshaler was called even though MarshalTOML exists; output:\n%s", got)
+	}
+}
+
+// pointerMarshalReceiver is a type with MarshalTOML on the POINTER receiver.
+// eindirect will take the address of a value field when the value is addressable
+// (i.e. when a pointer to the parent struct was passed to Encode, which is the
+// common usage pattern). When a struct is passed by value, fields are not
+// addressable by Go reflection rules, and the pointer-receiver marshaler cannot
+// be reached — this matches the standard Go method-set semantics.
+type pointerMarshalReceiver struct{ X int }
+
+func (p *pointerMarshalReceiver) MarshalTOML() ([]byte, error) {
+	return []byte(fmt.Sprintf("%d_ptr_form", p.X)), nil
+}
+
+func TestPointerReceiverMarshalViaValueField(t *testing.T) {
+	type S struct {
+		V pointerMarshalReceiver `toml:"v"`
+	}
+	in := S{V: pointerMarshalReceiver{X: 7}}
+
+	// Case 1: Encode(&in) — pointer to parent → fields ARE addressable → pointer
+	// receiver MarshalTOML is reachable via eindirect's Addr() path.
+	var buf1 bytes.Buffer
+	if err := NewEncoder(&buf1).Encode(&in); err != nil {
+		t.Fatalf("Encode(&in) failed: %s", err)
+	}
+	got1 := buf1.String()
+	if !strings.Contains(got1, "7_ptr_form") {
+		t.Errorf("Encode(&in): expected pointer-receiver MarshalTOML to produce 7_ptr_form, got:\n%s", got1)
+	}
+
+	// Case 2: Also works if the field itself is stored as a pointer.
+	type S2 struct {
+		V *pointerMarshalReceiver `toml:"v"`
+	}
+	in2 := S2{V: &pointerMarshalReceiver{X: 99}}
+	var buf2 bytes.Buffer
+	if err := NewEncoder(&buf2).Encode(in2); err != nil {
+		t.Fatalf("Encode(in2) failed: %s", err)
+	}
+	got2 := buf2.String()
+	if !strings.Contains(got2, "99_ptr_form") {
+		t.Errorf("Encode(in2): expected pointer-receiver MarshalTOML to produce 99_ptr_form, got:\n%s", got2)
+	}
+}

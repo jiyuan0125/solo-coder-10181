@@ -611,6 +611,14 @@ func tomlTypeOfGo(rv reflect.Value) tomlType {
 		}
 		return tomlArray
 	case reflect.Pointer, reflect.Interface:
+		// Check if the pointer/interface type itself implements a marshaler
+		// *before* dereferencing. This ensures pointer-receiver MarshalTOML
+		// implementations are detected correctly even when the element kind
+		// would normally be classified as a table/hash (e.g. struct behind a
+		// pointer where only the pointer type implements MarshalTOML).
+		if isMarshaler(rv) {
+			return tomlString
+		}
 		return tomlTypeOfGo(rv.Elem())
 	case reflect.String:
 		return tomlString
@@ -623,7 +631,7 @@ func tomlTypeOfGo(rv reflect.Value) tomlType {
 }
 
 func isMarshaler(rv reflect.Value) bool {
-	return rv.Type().Implements(marshalText) || rv.Type().Implements(marshalToml)
+	return rv.Type().Implements(marshalToml) || rv.Type().Implements(marshalText)
 }
 
 // isTableArray reports if all entries in the array or slice are a table.
@@ -677,10 +685,36 @@ func isZero(rv reflect.Value) bool {
 	switch rv.Kind() {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return rv.Int() == 0
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return rv.Uint() == 0
 	case reflect.Float32, reflect.Float64:
 		return rv.Float() == 0.0
+	case reflect.Complex64, reflect.Complex128:
+		return rv.Complex() == 0
+	case reflect.Bool:
+		return !rv.Bool()
+	case reflect.String:
+		return rv.String() == ""
+	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Interface, reflect.Slice:
+		return rv.IsNil()
+	case reflect.Array:
+		z := true
+		for i := 0; i < rv.Len(); i++ {
+			z = z && isZero(rv.Index(i))
+		}
+		return z
+	case reflect.Struct:
+		if rv.Type().Comparable() {
+			return reflect.Zero(rv.Type()).Interface() == rv.Interface()
+		}
+		for i := 0; i < rv.NumField(); i++ {
+			if !isZero(rv.Field(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.UnsafePointer:
+		return rv.IsNil()
 	}
 	return false
 }
@@ -797,7 +831,7 @@ func eindirect(v reflect.Value) reflect.Value {
 
 func isNil(rv reflect.Value) bool {
 	switch rv.Kind() {
-	case reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+	case reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.Chan, reflect.Func:
 		return rv.IsNil()
 	default:
 		return false

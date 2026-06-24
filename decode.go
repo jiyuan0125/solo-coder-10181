@@ -521,11 +521,22 @@ func (md *MetaData) unifyFloat64(data any, rv reflect.Value) error {
 	if num, ok := data.(float64); ok {
 		switch rvk {
 		case reflect.Float32:
-			if num < -math.MaxFloat32 || num > math.MaxFloat32 {
+			if !math.IsInf(num, 0) && (num < -math.MaxFloat32 || num > math.MaxFloat32) {
 				return md.parseErr(errParseRange{i: num, size: rvk.String()})
 			}
-			fallthrough
+			if isIntegerFloat(num) {
+				n := int64(num)
+				if int64(float32(n)) != n {
+					return md.parseErr(errUnsafeFloat{i: num, size: rvk.String(), key: md.context.String()})
+				}
+			}
+			rv.SetFloat(float64(float32(num)))
 		case reflect.Float64:
+			// When the source is already a float64 (e.g. the TOML parser parsed
+			// a literal "1.5" or "1e20"), any precision loss happened during
+			// lexing, not during our conversion. A round-trip check through
+			// int64(float64(n)) is meaningless here since the source value is
+			// already in float64 representation.
 			rv.SetFloat(num)
 		default:
 			panic("bug")
@@ -552,6 +563,13 @@ func (md *MetaData) unifyFloat64(data any, rv reflect.Value) error {
 	}
 
 	return md.badtype("float", data)
+}
+
+func isIntegerFloat(f float64) bool {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return false
+	}
+	return f == math.Trunc(f) && f >= float64(math.MinInt64) && f <= float64(math.MaxInt64)
 }
 
 func (md *MetaData) unifyInt(data any, rv reflect.Value) error {
@@ -685,16 +703,16 @@ func rvalue(v any) reflect.Value {
 // allocated for each nil pointer.
 //
 // An exception to this rule is if the value satisfies an interface of interest
-// to us (like encoding.TextUnmarshaler).
+// to us (like UnmarshalTOML or encoding.TextUnmarshaler).
 func indirect(v reflect.Value) reflect.Value {
 	if v.Kind() != reflect.Pointer {
 		if v.CanSet() {
 			pv := v.Addr()
 			pvi := pv.Interface()
-			if _, ok := pvi.(encoding.TextUnmarshaler); ok {
+			if _, ok := pvi.(Unmarshaler); ok {
 				return pv
 			}
-			if _, ok := pvi.(Unmarshaler); ok {
+			if _, ok := pvi.(encoding.TextUnmarshaler); ok {
 				return pv
 			}
 		}
@@ -711,10 +729,10 @@ func isUnifiable(rv reflect.Value) bool {
 		return true
 	}
 	rvi := rv.Interface()
-	if _, ok := rvi.(encoding.TextUnmarshaler); ok {
+	if _, ok := rvi.(Unmarshaler); ok {
 		return true
 	}
-	if _, ok := rvi.(Unmarshaler); ok {
+	if _, ok := rvi.(encoding.TextUnmarshaler); ok {
 		return true
 	}
 	return false

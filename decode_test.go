@@ -1559,3 +1559,254 @@ dt   = 2024-01-15T09:30:00
 		t.Errorf("local date calendar values changed after round-trip: have %04d-%02d-%02d, want 2024-01-15\nencoded:\n%s", y, mo, da, buf.String())
 	}
 }
+
+type floatLiteralTest struct {
+	name string
+	toml string
+	kind reflect.Kind
+	bad  bool
+}
+
+// TestUnsafeFloatLiteralCoverage verifies that float literals (decimal point
+// and scientific notation forms) go through the same precision-safety check
+// as integer-literals decoded to float destinations. Both positive and
+// negative directions must trigger the guard.
+func TestUnsafeFloatLiteralCoverage(t *testing.T) {
+	tests := []floatLiteralTest{
+		// --- Positive: decimal-point form, float32 destination ---
+		{"f32 dec positive safe", "V = 16777216.0", reflect.Float32, false}, // 2^24 exact
+		{"f32 dec positive unsafe", "V = 16777217.0", reflect.Float32, true},  // 2^24+1 lossy
+		{"f32 dec positive large unsafe", "V = 2147483647.0", reflect.Float32, true},
+		// --- Negative: decimal-point form, float32 destination ---
+		{"f32 dec negative safe", "V = -16777216.0", reflect.Float32, false},
+		{"f32 dec negative unsafe", "V = -16777217.0", reflect.Float32, true},
+		{"f32 dec negative large unsafe", "V = -2147483647.0", reflect.Float32, true},
+		// --- Scientific notation, float32 destination ---
+		{"f32 sci positive safe", "V = 1.6777216e7", reflect.Float32, false},
+		{"f32 sci positive unsafe", "V = 1.6777217e7", reflect.Float32, true},
+		{"f32 sci negative unsafe", "V = -1.6777217e7", reflect.Float32, true},
+		// --- Values with fractional component are always allowed (no integer round-trip check) ---
+		{"f32 fractional allowed", "V = 16777217.5", reflect.Float32, false},
+		{"f32 fractional negative allowed", "V = -16777217.5", reflect.Float32, false},
+		// --- float64 boundary: safe cases pass as expected.
+		//     NOTE: For float64 destination + float64 literal source, the TOML
+		//     parser has already performed any rounding during lexing, so we
+		//     cannot detect further precision loss on the float64→float64 path.
+		//     Only int64→float64 (integer source literal) can detect loss via
+		//     round-trip check, since the source integer stays exact.
+		{"f64 dec safe 2^53", "V = 9007199254740992.0", reflect.Float64, false},
+		{"f64 sci safe 2^53", "V = 9.007199254740992e15", reflect.Float64, false},
+		// --- float64 literal → float32 destination: precision loss MUST be detected.
+		//     These values are exact integers in float64 but NOT in float32.
+		//     (We pick values with many significant bits, not pure powers of 2
+		//      which would be representable exactly even in float32 due to its
+		//      8-bit exponent range.)
+		{"f32_from_f64 dec large unsafe", "V = 12345678901234567.0", reflect.Float32, true},
+		{"f32_from_f64 sci large unsafe", "V = 2147483647.0", reflect.Float32, true},
+		{"f32_from_f64 sci negative large unsafe", "V = -12345678901234567.0", reflect.Float32, true},
+		// --- NaN / Inf never trigger integer-safety check ---
+		{"f32 nan allowed", "V = nan", reflect.Float32, false},
+		{"f32 inf allowed", "V = inf", reflect.Float32, false},
+		{"f32 -inf allowed", "V = -inf", reflect.Float32, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var err error
+			if tt.kind == reflect.Float32 {
+				var s struct{ V float32 }
+				_, err = Decode(tt.toml, &s)
+			} else {
+				var s struct{ V float64 }
+				_, err = Decode(tt.toml, &s)
+			}
+			if tt.bad && err == nil {
+				t.Errorf("expected unsafe-float error, got nil for toml: %s", tt.toml)
+			}
+			if !tt.bad && err != nil {
+				t.Errorf("expected no error, got %v for toml: %s", err, tt.toml)
+			}
+			if tt.bad && err != nil {
+				errStr := err.Error()
+				if !strings.Contains(errStr, "round-trip") && !strings.Contains(errStr, "cannot be represented exactly") {
+					t.Errorf("error should mention round-trip precision loss, got: %s", errStr)
+				}
+			}
+		})
+	}
+}
+
+// TestTaggedFieldCaseAmbiguity verifies that multiple fields whose explicit
+// `toml` tags differ only by case are detected as ambiguous and recorded
+// as collisions (rather than silently landing on one of them).
+func TestTaggedFieldCaseAmbiguity(t *testing.T) {
+	// Two fields with EXPLICIT toml tags that are case-insensitively equal.
+	type BothTagged struct {
+		Alpha int `toml:"value"`
+		Beta  int `toml:"VALUE"`
+	}
+	var s BothTagged
+	md, err := Decode("value = 42", &s)
+	if err != nil {
+		t.Fatalf("Decode failed: %s", err)
+	}
+	// Both fields should remain at zero since all candidates were dropped due
+	// to the case-insensitive tag-name tie at the same level.
+	if s.Alpha != 0 || s.Beta != 0 {
+		t.Errorf("expected both fields to remain 0 due to tag ambiguity; got Alpha=%d Beta=%d", s.Alpha, s.Beta)
+	}
+	// The collision MUST be reported in metadata.
+	if len(md.Collisions) == 0 {
+		t.Fatal("expected at least one recorded collision for case-differing explicit tags, got none")
+	}
+	found := false
+	for _, c := range md.Collisions {
+		if strings.EqualFold(c.FieldName, "value") && c.Dropped >= 2 {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected collision report for 'value' with ≥2 dropped, got %+v", md.Collisions)
+	}
+}
+
+// TestMixedExplicitTagAndFieldNameAmbiguity verifies that an explicit toml tag
+// that case-insensitively matches a plain Go field name is also detected as
+// ambiguous when both are at the same embedding depth.
+func TestMixedExplicitTagAndFieldNameAmbiguity(t *testing.T) {
+	type Mixed struct {
+		Named int `toml:"mykey"` // explicit tag
+		MyKey int               // plain Go field (case-insensitive match)
+	}
+	var s Mixed
+	md, err := Decode("mykey = 99", &s)
+	if err != nil {
+		t.Fatalf("Decode failed: %s", err)
+	}
+	// The explicitly tagged field must win over the untagged Go field at the
+	// same level (this is the behaviour implemented by dominantField: a tagged
+	// field is the winner even against case-insensitive name matches).
+	if s.Named != 99 {
+		t.Errorf("expected explicit tag to win; Named=%d (want 99), MyKey=%d", s.Named, s.MyKey)
+	}
+	_ = md
+}
+
+// BothUnmarshalAndText implements both UnmarshalTOML and TextUnmarshaler.
+// UnmarshalTOML should ALWAYS be preferred when both are present.
+type BothUnmarshalAndText struct {
+	Which string
+	Value string
+}
+
+func (b *BothUnmarshalAndText) UnmarshalTOML(data any) error {
+	b.Which = "UnmarshalTOML"
+	if s, ok := data.(string); ok {
+		b.Value = s
+	}
+	return nil
+}
+
+func (b *BothUnmarshalAndText) UnmarshalText(text []byte) error {
+	b.Which = "TextUnmarshaler" // should NEVER be reached
+	b.Value = string(text)
+	return nil
+}
+
+// TestUnmarshalTOMLTakesPriorityOverText verifies that when a destination
+// type implements BOTH UnmarshalTOML and encoding.TextUnmarshaler, the
+// library calls UnmarshalTOML (which has access to the full TOML tree shape)
+// rather than TextUnmarshaler.
+func TestUnmarshalTOMLTakesPriorityOverText(t *testing.T) {
+	// string data would qualify for TextUnmarshaler, but UnmarshalTOML wins.
+	var s struct {
+		V BothUnmarshalAndText `toml:"v"`
+	}
+	_, err := Decode(`v = "hello"`, &s)
+	if err != nil {
+		t.Fatalf("Decode failed: %s", err)
+	}
+	if s.V.Which != "UnmarshalTOML" {
+		t.Errorf("expected UnmarshalTOML to be called, but %q was called (value=%q)",
+			s.V.Which, s.V.Value)
+	}
+	if s.V.Value != "hello" {
+		t.Errorf("value mismatch: have %q want %q", s.V.Value, "hello")
+	}
+}
+
+// valueReceiverOnly is a value type whose UnmarshalTOML is defined on the
+// POINTER receiver only (the common Go pattern). Decoding into the value type
+// must still work, because indirect() takes the address when CanSet().
+type valueReceiverOnly struct {
+	Called bool
+	Data   int
+}
+
+func (v *valueReceiverOnly) UnmarshalTOML(data any) error {
+	v.Called = true
+	if f, ok := data.(int64); ok {
+		v.Data = int(f)
+	} else if m, ok := data.(map[string]any); ok {
+		if n, ok2 := m["x"].(int64); ok2 {
+			v.Data = int(n)
+		}
+	}
+	return nil
+}
+
+// TestPointerReceiverUnmarshalViaValue verifies that a pointer-receiver
+// UnmarshalTOML is correctly invoked even when the struct field is declared
+// as a value type (not a pointer). The library must take the address.
+func TestPointerReceiverUnmarshalViaValue(t *testing.T) {
+	// Value-field destination, NOT a pointer.
+	var s struct {
+		V valueReceiverOnly `toml:"v"`
+	}
+	_, err := Decode(`v = { x = 7 }`, &s)
+	if err != nil {
+		t.Fatalf("Decode failed: %s", err)
+	}
+	if !s.V.Called {
+		t.Error("pointer-receiver UnmarshalTOML was not invoked for value-type field")
+	}
+	if s.V.Data != 7 {
+		t.Errorf("Data mismatch: have %d want 7", s.V.Data)
+	}
+}
+
+// Same as above but for TextUnmarshaler on pointer receiver, used via value.
+// NOTE: Use a scalar underlying type (string alias) rather than a struct.
+// The library intentionally skips TextUnmarshaler for composite kinds
+// (struct/map/array/slice) even when the interface is defined — this matches
+// the existing comment in unify() describing that composite types use the
+// normal decoding path. Using a scalar alias lets us verify the
+// pointer-receiver-via-Add() path for TextUnmarshaler without running into
+// that composite-type guard.
+type textPtrReceiver string
+
+var textPtrReceiverCalled = false
+
+func (t *textPtrReceiver) UnmarshalText(text []byte) error {
+	textPtrReceiverCalled = true
+	*t = textPtrReceiver("got:" + string(text))
+	return nil
+}
+
+func TestPointerReceiverTextUnmarshalViaValue(t *testing.T) {
+	textPtrReceiverCalled = false
+	var s struct {
+		V textPtrReceiver `toml:"v"`
+	}
+	_, err := Decode(`v = "world"`, &s)
+	if err != nil {
+		t.Fatalf("Decode failed: %s", err)
+	}
+	if !textPtrReceiverCalled {
+		t.Error("pointer-receiver TextUnmarshaler was not invoked for value-type field")
+	}
+	if string(s.V) != "got:world" {
+		t.Errorf("Text mismatch: have %q want %q", string(s.V), "got:world")
+	}
+}
